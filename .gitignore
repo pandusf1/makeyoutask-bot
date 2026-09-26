@@ -1,0 +1,17 @@
+# Kredensial & konfigurasi pribadi
+config.json
+
+# Session / Cookie files
+*.txt
+*.cookie
+cookies/
+
+# Log & temporary files
+*.log
+*.tmp
+*.html
+scratch/
+
+# OS metadata
+.DS_Store
+Thumbs.db
