@@ -189,7 +189,7 @@ function cloud($apikey, $sitekey, $pageurl = host, $cdata = '') {
 
     if (empty($id)) return "ERROR_UNKNOWN";
 
-    // Reuse persistent connection handle
+    // Reuse connection handle for polling
     $ch2 = curl_init("https://vernuable.my.id/res.php");
     curl_setopt_array($ch2, [
         CURLOPT_RETURNTRANSFER => true,
@@ -228,25 +228,26 @@ function cloud($apikey, $sitekey, $pageurl = host, $cdata = '') {
                 $token = $resJson['token'] ?? $resJson['request'] ?? '';
                 if (!empty($token)) {
                     curl_close($ch2);
-                    echo "\r" . str_repeat(' ', 50) . "\r";
+                    echo "\r" . str_repeat(' ', 65) . "\r";
                     return ["turnstile" => $token];
                 }
             }
             $req = $resJson['request'] ?? '';
             if ($req === 'CAPCHA_NOT_READY' || $req === 'NOT_READY' || $req === 'ERROR_SOLVE_PENDING') {
                 echo cyan . "  [~] Polling Captcha ($attempt/$max_attempts)...\r" . reset;
-                usleep(1200000); // 1.2 detik responsif
+                usleep(1200000);
                 continue;
             }
             if (strpos($req, 'ERROR_') === 0 || strpos($req, 'WRONG_') === 0) {
                 curl_close($ch2);
+                echo "\r" . str_repeat(' ', 65) . "\r";
                 return $req;
             }
         } else {
             if (strpos($result, "OK|") === 0) {
                 $token = trim(explode("|", $result)[1]);
                 curl_close($ch2);
-                echo "\r" . str_repeat(' ', 50) . "\r";
+                echo "\r" . str_repeat(' ', 65) . "\r";
                 return ["turnstile" => $token];
             }
             if (strpos($result, "CAPCHA_NOT_READY") !== false || strpos($result, "NOT_READY") !== false || strpos($result, "ERROR_SOLVE_PENDING") !== false) {
@@ -256,12 +257,40 @@ function cloud($apikey, $sitekey, $pageurl = host, $cdata = '') {
             }
             if (strpos($result, "ERROR_") === 0 || strpos($result, "WRONG_") === 0) {
                 curl_close($ch2);
+                echo "\r" . str_repeat(' ', 65) . "\r";
                 return trim($result);
             }
         }
         usleep(1200000);
     }
     curl_close($ch2);
+    echo "\r" . str_repeat(' ', 65) . "\r";
+    return "ERROR_TIMEOUT";
+}
+
+function solve_turnstile_with_retry($apikey, $sitekey, $pageurl, $max_retries = 3) {
+    if (empty($sitekey)) return "EMPTY_SITEKEY";
+
+    for ($try = 1; $try <= $max_retries; $try++) {
+        $res = cloud($apikey, $sitekey, $pageurl);
+        if (is_array($res) && !empty($res['turnstile'])) {
+            return $res;
+        }
+
+        $err = is_string($res) ? $res : 'ERROR_UNKNOWN';
+        // Fatal key/balance errors: no need to retry
+        if (in_array($err, ['ERROR_KEY_DOES_NOT_EXIST', 'ERROR_WRONG_USER_KEY', 'ERROR_ZERO_BALANCE'])) {
+            return $err;
+        }
+
+        if ($try < $max_retries) {
+            echo kuning . "  [~] Captcha retry ($try/$max_retries): $err\r" . reset;
+            sleep(2);
+            echo "\r" . str_repeat(' ', 65) . "\r";
+        } else {
+            return $err;
+        }
+    }
     return "ERROR_TIMEOUT";
 }
 
@@ -451,12 +480,7 @@ function do_login($apikey, $email, $password, $a, $b) {
     }
 
     if (!empty($sitekey)) {
-        $bypass = ""; $tries = 0;
-        do {
-            $bypass = cloud($apikey, $sitekey);
-            $tries++;
-        } while (!is_array($bypass) && $tries < 5);
-
+        $bypass = solve_turnstile_with_retry($apikey, $sitekey, host . "/login", 4);
         if (!is_array($bypass)) {
             echo putih . "  [AUTH] " . merah . "Failed to solve login captcha: " . (is_string($bypass) ? $bypass : 'Unknown') . "\n" . reset;
             return false;
@@ -630,16 +654,23 @@ if (is_logged_in($dash)) {
         goto relogin_block;
     }
 
-    preg_match('/name="csrf_token_name".*?value="([^"]+)"/', $youtubeviews, $csrf);
+    preg_match('/(?:name="csrf_token_name"|id="csrf-token")[^>]*value=["\']([^"\']+)["\']/i', $youtubeviews, $csrf);
     $token = $csrf[1] ?? '';
-    preg_match('/(?:data-sitekey|data-key)="([^"]+)"/', $youtubeviews, $site);
+    preg_match('/(?:data-sitekey|data-key)=["\']([^"\']+)["\']/i', $youtubeviews, $site);
     $sitekey = $site[1] ?? '';
+    if (empty($sitekey) && preg_match('/0x4[A-Za-z0-9_-]{20,}/', $youtubeviews, $sm)) {
+        $sitekey = $sm[0];
+    }
     preg_match('/let timer = (\d+);/', $youtubeviews, $tmr);
     preg_match('/let adId = (\d+);/', $youtubeviews, $xid);
     $waktu = (int)($tmr[1] ?? 0);
     $ad_id = $xid[1] ?? '';
 
     if ($ad_id) {
+        $m_dur = floor($waktu / 60);
+        $s_dur = $waktu % 60;
+        echo cyan . "  [YouTube] Video #$ad_id (" . sprintf('%02d:%02d', $m_dur, $s_dur) . ") - Starting session...\n" . reset;
+
         $start_session = skibidixxx(host . "/youtubeviews/start_session", "POST", [
             'ad_id'           => $ad_id,
             'timer'           => $waktu,
@@ -650,7 +681,7 @@ if (is_logged_in($dash)) {
         $csrf_hash = $hres[1] ?? '';
 
         if ($check && $csrf_hash) {
-            timer($waktu, "  [YouTube] Watching...");
+            timer($waktu, "  [YouTube] Watching");
             sleep(2);
 
             if (empty($sitekey)) {
@@ -663,11 +694,11 @@ if (is_logged_in($dash)) {
                 } else {
                     echo merah . "  [YouTube] Failed to claim reward\n" . reset;
                 }
+                sleep(2);
                 goto lanjut;
             }
 
-            tryy:
-            $bypass = cloud($apikey, $sitekey);
+            $bypass = solve_turnstile_with_retry($apikey, $sitekey, host . "/youtubeviews", 3);
             if (is_array($bypass) && !empty($bypass['turnstile'])) {
                 $data  = http_build_query([
                     "csrf_token_name"       => $csrf_hash,
@@ -682,11 +713,11 @@ if (is_logged_in($dash)) {
                 } else {
                     echo merah . "  [YouTube] Failed to claim reward\n" . reset;
                 }
+                sleep(2);
                 goto lanjut;
-            } elseif (in_array($bypass, ["WRONG_CAPTCHA_ID","ERROR_CAPTCHA_UNSOLVABLE","ERROR_TOO_MANY_REQUESTS","ERROR_SOLVE_PENDING","INTENAL_SERVER_ERROR","CURL_ERROR"])) {
-                goto tryy;
             } else {
-                echo merah . "  [YouTube] Captcha bypass error\n" . reset;
+                echo merah . "  [YouTube] Captcha error: " . (is_string($bypass) ? $bypass : json_encode($bypass)) . "\n" . reset;
+                sleep(3);
                 goto lanjut;
             }
         } else {
@@ -765,8 +796,7 @@ if (is_logged_in($dash)) {
             continue;
         }
 
-        tai_ptc:
-        $bypass = cloud($apikey, $sitekey);
+        $bypass = solve_turnstile_with_retry($apikey, $sitekey, host . "/ptc", 3);
         if (is_array($bypass) && !empty($bypass['turnstile'])) {
             $data  = http_build_query([
                 "csrf_token_name"       => $token,
@@ -781,10 +811,8 @@ if (is_logged_in($dash)) {
             } else {
                 echo merah . "  [Window #$num] Failed to claim reward\n" . reset;
             }
-        } elseif (in_array($bypass, ["WRONG_CAPTCHA_ID","ERROR_CAPTCHA_UNSOLVABLE","ERROR_TOO_MANY_REQUESTS","ERROR_SOLVE_PENDING","INTENAL_SERVER_ERROR","CURL_ERROR"])) {
-            goto tai_ptc;
         } else {
-            echo merah . "  [Window #$num] Failed to bypass captcha\n" . reset;
+            echo merah . "  [Window #$num] Captcha error: " . (is_string($bypass) ? $bypass : json_encode($bypass)) . "\n" . reset;
         }
     }
     goto iframe;
@@ -863,8 +891,7 @@ if (is_logged_in($dash)) {
             continue;
         }
 
-        nyawit:
-        $bypass = cloud($apikey, $sitekey);
+        $bypass = solve_turnstile_with_retry($apikey, $sitekey, host . "/ptc/iframe", 3);
         if (is_array($bypass) && !empty($bypass['turnstile'])) {
             $data  = http_build_query([
                 "captcha"               => "turnstile",
@@ -879,10 +906,8 @@ if (is_logged_in($dash)) {
             } else {
                 echo merah . "  [iFrame #$num] Failed to claim reward\n" . reset;
             }
-        } elseif (in_array($bypass, ["WRONG_CAPTCHA_ID","ERROR_CAPTCHA_UNSOLVABLE","ERROR_TOO_MANY_REQUESTS","ERROR_SOLVE_PENDING","INTENAL_SERVER_ERROR","CURL_ERROR"])) {
-            goto nyawit;
         } else {
-            echo merah . "  [iFrame #$num] Failed to bypass captcha\n" . reset;
+            echo merah . "  [iFrame #$num] Captcha error: " . (is_string($bypass) ? $bypass : json_encode($bypass)) . "\n" . reset;
         }
     }
 
